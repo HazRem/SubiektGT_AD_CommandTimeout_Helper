@@ -2,7 +2,7 @@
 .SYNOPSIS
   List all AD users with SID and allow repeated filtering, with indexes.
   Reads a specific registry value for each displayed user.
-  Opens regedit directly to the 'Connection Properties' key.
+  After selecting a user, allows choosing between opening the registry or setting a DWORD value.
 #>
 
 # Automatyczne żądanie uprawnień administratora
@@ -20,7 +20,7 @@ $users = Get-ADUser -Filter * -Properties SID |
 
 Write-Host "Found $($users.Count) users in AD." -ForegroundColor Cyan
 Write-Host "You can filter by Name, SamAccountName, or SID." -ForegroundColor Yellow
-Write-Host "After filtering, type an index number to open that user's 'Connection Properties' key in the registry." -ForegroundColor Yellow
+Write-Host "After filtering, type an index number to choose an action for that user." -ForegroundColor Yellow
 
 # Zmienna do przechowywania ostatniego zestawu wyników
 $lastResults = $null
@@ -34,7 +34,7 @@ while ($true) {
         break
     }
 
-    # BLOK: Sprawdź, czy wprowadzono numer indeksu, aby otworzyć rejestr
+    # BLOK: Sprawdź, czy wprowadzono numer indeksu, aby wybrać akcję
     if ($input -match '^\d+$') {
         $index = [int]$input
         if ($null -eq $lastResults) {
@@ -46,22 +46,55 @@ while ($true) {
             $selectedUser = $lastResults[$index - 1]
             $sid = $selectedUser.SID.Value
             
-            $regPath = "HKEY_USERS\$sid\Software\InsERT\InsERT GT\dbman\1.0\Connection Properties"
+            # Zdefiniuj ścieżki dla Edytora Rejestru i dostawcy PowerShell
+            $regPathForRegedit = "HKEY_USERS\$sid\Software\InsERT\InsERT GT\dbman\1.0\Connection Properties"
+            $regPathForPS = "Registry::HKEY_USERS\$sid\Software\InsERT\InsERT GT\dbman\1.0\Connection Properties"
 
-            Write-Host "Closing any existing Registry Editor windows to ensure a fresh start..." -ForegroundColor Gray
-            Get-Process regedit -ErrorAction SilentlyContinue | Stop-Process -Force
-            Start-Sleep -Milliseconds 250 
+            # >>> POCZĄTEK NOWEGO MENU WYBORU <<<
+            Write-Host "`nAction for $($selectedUser.SamAccountName):" -ForegroundColor Yellow
+            Write-Host "  [1] Open Registry Editor to this path"
+            Write-Host "  [2] Set 'Command Timeout' to 0 (DWORD)"
+            $action = Read-Host "Choose an option (or press Enter to cancel)"
 
-            Write-Host "Opening Registry Editor to 'Connection Properties' for $($selectedUser.SamAccountName)..." -ForegroundColor Cyan
-            Write-Host $regPath -ForegroundColor White
-            
-            $regeditAppPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit"
-            if (-not (Test-Path $regeditAppPath)) {
-                New-Item -Path $regeditAppPath -Force | Out-Null
+            switch ($action) {
+                '1' {
+                    # Akcja: Otwórz Edytor Rejestru
+                    Write-Host "Closing any existing Registry Editor windows..." -ForegroundColor Gray
+                    Get-Process regedit -ErrorAction SilentlyContinue | Stop-Process -Force
+                    Start-Sleep -Milliseconds 250 
+
+                    Write-Host "Opening Registry Editor to 'Connection Properties'..." -ForegroundColor Cyan
+                    Write-Host $regPathForRegedit -ForegroundColor White
+                    
+                    $regeditAppPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit"
+                    if (-not (Test-Path $regeditAppPath)) {
+                        New-Item -Path $regeditAppPath -Force | Out-Null
+                    }
+                    Set-ItemProperty -Path $regeditAppPath -Name "LastKey" -Value $regPathForRegedit -Force
+                    Start-Process regedit.exe
+                }
+                '2' {
+                    # Akcja: Ustaw wartość DWORD
+                    try {
+                        Write-Host "Setting 'Command Timeout' to 0..." -ForegroundColor Cyan
+                        # Utwórz klucz, jeśli nie istnieje
+                        if (-not (Test-Path $regPathForPS)) {
+                            New-Item -Path $regPathForPS -Force | Out-Null
+                            Write-Host "Created missing registry key path." -ForegroundColor Gray
+                        }
+                        # Ustaw wartość DWORD (tworzy ją lub nadpisuje)
+                        Set-ItemProperty -Path $regPathForPS -Name "Command Timeout" -Value 0 -Type DWord -Force
+                        Write-Host "Successfully set 'Command Timeout' DWORD value to 0 for $($selectedUser.SamAccountName)." -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Error "Failed to set registry value. Error: $($_.Exception.Message)"
+                    }
+                }
+                default {
+                    Write-Host "Operation cancelled." -ForegroundColor DarkYellow
+                }
             }
-            Set-ItemProperty -Path $regeditAppPath -Name "LastKey" -Value $regPath -Force
-
-            Start-Process regedit.exe
+            # >>> KONIEC NOWEGO MENU WYBORU <<<
             continue
         } else {
             Write-Host "Invalid index. Please enter a number between 1 and $($lastResults.Count)." -ForegroundColor Red
@@ -72,10 +105,8 @@ while ($true) {
     # BLOK: Logika filtrowania
     $filter = $input 
     if ([string]::IsNullOrWhiteSpace($filter)) {
-        # >>> POPRAWKA: Użyj @(), aby zawsze traktować wynik jako listę <<<
         $filtered = @($users)
     } else {
-        # >>> POPRAWKA: Użyj @(), aby zawsze traktować wynik jako listę <<<
         $filtered = @($users | Where-Object {
             $_.Name -like "*$filter*" -or
             $_.SamAccountName -like "*$filter*" -or
@@ -93,7 +124,6 @@ while ($true) {
         $i = 0
         $finalResults = foreach ($user in $lastResults) {
             $i++ 
-
             $sid = $user.SID.Value
             $regQueryPath = "Registry::HKEY_USERS\$sid\Software\InsERT\InsERT GT\dbman\1.0\Connection Properties"
             $valueName = "Command Timeout"
@@ -114,6 +144,6 @@ while ($true) {
 
         $finalResults | Format-Table -AutoSize
         
-        Write-Host "($($lastResults.Count) matches) - Enter an index to open registry." -ForegroundColor Cyan
+        Write-Host "($($lastResults.Count) matches) - Enter an index to choose an action." -ForegroundColor Cyan
     }
 }
